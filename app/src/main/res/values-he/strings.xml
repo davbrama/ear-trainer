@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">מאמן שמיעה</string>
+    <string name="notification_channel">תרגול</string>
+    <string name="notification_listening">מקשיב לפקודות</string>
+    <string name="action_repeat">שוב</string>
+    <string name="action_reveal">תשובה</string>
+    <string name="action_skip">דלג</string>
+    <string name="action_easier">יותר קל</string>
+</resources>
