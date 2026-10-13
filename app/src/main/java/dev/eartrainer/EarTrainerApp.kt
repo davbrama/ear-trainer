@@ -10,6 +10,7 @@ class EarTrainerApp : Application() {
     override fun onCreate() {
         super.onCreate()
         CrashLog.install(this)
+        PauseLog.init(this)
         if (Build.VERSION.SDK_INT < 26) return
         val manager = getSystemService(NotificationManager::class.java)
         val channel = NotificationChannel(

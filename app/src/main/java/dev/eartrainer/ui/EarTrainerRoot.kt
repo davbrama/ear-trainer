@@ -432,6 +432,10 @@ private fun SettingsScreen(
         ToggleRow(Copy.listening(language), null, settings.listenForCommands) {
             onAction(VoiceAction.SetListening(it))
         }
+        val context = LocalContext.current
+        OutlinedButton(onClick = { ReportShare.share(context, language) }, modifier = Modifier.fillMaxWidth()) {
+            Text(Copy.crashShare(language))
+        }
         OutlinedButton(onClick = { onAction(VoiceAction.RequestReset) }, modifier = Modifier.fillMaxWidth()) {
             Text(Copy.reset(language))
         }

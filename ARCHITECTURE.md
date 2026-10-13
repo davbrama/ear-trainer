@@ -33,7 +33,18 @@ Version 1 only deals naming exercises. `IntervalExercises.singback` already buil
 - **Confirm / dictate feedback.** Speech mic, media focus held.
 - **Idle or paused.** Mic only if "keep listening" is on. Focus released.
 
-`AndroidAudioFocus` requests `AUDIOFOCUS_GAIN` for a held drill and abandons it on pause or idle. A real focus loss pauses the session. ExoPlayer is created with `handleAudioFocus = false` so this port, not the player, decides.
+`AndroidAudioFocus` requests `AUDIOFOCUS_GAIN` for a held drill, keeps the same request across phases, and abandons it on pause or idle. ExoPlayer is created with `handleAudioFocus = false` so this port, not the player, decides.
+
+## Who may pause
+
+`PauseArbiter` (in `:core`) is the only gate into `VoiceAction.Pause`. Every request carries its source: voice command, app button, media controller (notification, headset, Android Auto), or audio-focus loss.
+
+- Voice "pause" / "hold on" / "השהה" / "רגע" and the on-screen button always pause.
+- Focus losses are attributed by time to our own clients. Each client has its own window: TTS from the start of a prompt until 1.5 s after it ends, and the recognizer for 3 s after each `startListening` (the system recognizer takes transient focus to mute media). A loss inside either window is ours and is ignored.
+- Focus losses and media-controller pauses are ignored for 2.5 s after start or resume.
+- Recognizer errors and end-of-speech never pause.
+
+`PauseLog` records each decision with its source and reason, plus focus changes and recognizer errors. "Share report" (crash banner and Settings) sends it with the crash log.
 
 ## Other extension points
 

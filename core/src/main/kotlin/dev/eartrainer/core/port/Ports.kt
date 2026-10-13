@@ -54,7 +54,9 @@ interface PcmCapture {
 interface AudioFocusPort {
     fun apply(focus: FocusRequest)
     fun release()
-    fun setOnFocusLost(listener: () -> Unit)
+
+    /** [transient] is true for AUDIOFOCUS_LOSS_TRANSIENT, false for AUDIOFOCUS_LOSS. Ducking is not a loss. */
+    fun setOnFocusLost(listener: (transient: Boolean) -> Unit)
 }
 
 /** Optional outbound path. v1 keeps feedback on the device and this returns failure. */

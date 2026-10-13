@@ -4,12 +4,17 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import dev.eartrainer.PauseLog
 import dev.eartrainer.audio.SwitchingAudioInput
 import dev.eartrainer.audio.TonePlayer
 import dev.eartrainer.core.audio.AudioTurnPolicy
+import dev.eartrainer.core.audio.InternalAudioClient
 import dev.eartrainer.core.audio.MicMode
+import dev.eartrainer.core.audio.PauseArbiter
+import dev.eartrainer.core.audio.PauseSource
 import dev.eartrainer.core.model.DirectionMode
 import dev.eartrainer.core.model.IntervalSet
 import dev.eartrainer.core.model.Phase
@@ -56,6 +61,7 @@ class SessionRuntime(
     private val scope: CoroutineScope,
     private val systemTag: () -> String,
     private val micGranted: () -> Boolean,
+    private val mediaController: () -> String? = { null },
 ) {
     private val session = PracticeSession(
         settings = stores.loadSettings(),
@@ -69,21 +75,28 @@ class SessionRuntime(
     private var playToken = 0
     private var listenToken = 0
     private var hebrewWarned = false
+    private val pauses = PauseArbiter(clock = SystemClock::elapsedRealtime)
 
     val state: StateFlow<UiState> = stateFlow.asStateFlow()
 
     init {
-        focus.setOnFocusLost {
+        focus.setOnFocusLost { transient ->
             scope.launch {
-                val phase = session.snapshot().phase
-                if (phase != Phase.IDLE && phase != Phase.PAUSED && phase != Phase.SPEAKING) {
-                    dispatch(session.onAction(VoiceAction.Pause))
-                }
+                val source = if (transient) PauseSource.FOCUS_LOSS_TRANSIENT else PauseSource.FOCUS_LOSS
+                requestPause(source)
             }
         }
-        player.onUserPause = { submit(VoiceAction.Pause) }
+        player.onUserPause = {
+            val controller = mediaController()
+            scope.launch {
+                val paused = requestPause(PauseSource.MEDIA_CONTROLLER, controller)
+                // An ignored controller pause already stopped ExoPlayer; restart the tone so onEnded still fires.
+                if (!paused && session.snapshot().phase == Phase.PLAYING) player.resumeIfPaused()
+            }
+        }
         player.onUserPlay = {
             val phase = session.snapshot().phase
+            PauseLog.log("play from media controller ${mediaController() ?: "?"} in ${phase.name}")
             when (phase) {
                 Phase.PAUSED -> submit(VoiceAction.Resume)
                 Phase.IDLE -> submit(VoiceAction.StartSession)
@@ -95,8 +108,11 @@ class SessionRuntime(
         openMic()
     }
 
+    /** On-screen controls, Android Auto custom commands, and media-controller play. */
     fun submit(action: VoiceAction) {
-        scope.launch { dispatch(session.onAction(action)) }
+        scope.launch {
+            if (action == VoiceAction.Pause) requestPause(PauseSource.APP_BUTTON) else act(action)
+        }
     }
 
     fun refreshMic() {
@@ -124,6 +140,8 @@ class SessionRuntime(
             else -> null
         }
         dispatch(session.retune(set, direction))
+        pauses.sessionStarted()
+        PauseLog.log("start from media library ${mediaId ?: query ?: "?"}")
         val play = session.startImmediate().filterIsInstance<Effect.Play>().first()
         val metadata = metadata(play.exercise.direction?.name)
         val file = player.write(play.exercise, session.snapshot().settings.instrument)
@@ -162,6 +180,29 @@ class SessionRuntime(
         focus.release()
         player.stop()
         if (wakeLock.isHeld) wakeLock.release()
+    }
+
+    private fun act(action: VoiceAction) {
+        if (action == VoiceAction.StartSession || action == VoiceAction.Resume) {
+            pauses.sessionStarted()
+            PauseLog.log("${action::class.simpleName} in ${session.snapshot().phase.name}")
+        }
+        dispatch(session.onAction(action))
+    }
+
+    /** The only way into [VoiceAction.Pause]. Returns true if the drill was paused. */
+    private fun requestPause(
+        source: PauseSource,
+        detail: String? = null,
+        pause: () -> List<Effect> = { session.onAction(VoiceAction.Pause) },
+    ): Boolean {
+        val phase = session.snapshot().phase
+        val decision = pauses.decide(source, phase)
+        val verdict = if (decision.pause) "PAUSE" else "ignored"
+        val extra = if (detail.isNullOrBlank()) "" else " [$detail]"
+        PauseLog.log("$verdict source=${source.name} phase=${phase.name} reason=${decision.reason}$extra")
+        if (decision.pause) dispatch(pause())
+        return decision.pause
     }
 
     private fun dispatch(effects: List<Effect>) {
@@ -217,6 +258,7 @@ class SessionRuntime(
             Prompts.render(effect.key, language, effect.args)
         }
         applyPlan(Phase.SPEAKING)
+        pauses.clientStarted(InternalAudioClient.TTS)
         main.postDelayed({
             if (token == speechToken) finishSpeech(token)
         }, 12_000)
@@ -231,6 +273,7 @@ class SessionRuntime(
     private fun finishSpeech(token: Int) {
         if (token != speechToken) return
         speechToken += 1
+        pauses.clientStopped(InternalAudioClient.TTS)
         dispatch(session.onSpeechFinished())
     }
 
@@ -238,6 +281,7 @@ class SessionRuntime(
         val token = ++playToken
         speechToken += 1
         speechOut.stop()
+        pauses.clientStopped(InternalAudioClient.TTS)
         closeMic()
         applyPlan(Phase.PLAYING)
         player.onEnded = {
@@ -267,6 +311,7 @@ class SessionRuntime(
         val snap = session.snapshot()
         val plan = AudioTurnPolicy.plan(snap.phase, snap.exercise?.modality, snap.keepListening)
         focus.apply(plan.focus)
+        if (plan.mic == MicMode.SPEECH) pauses.clientStarted(InternalAudioClient.RECOGNIZER)
         input.use(
             mode = plan.mic,
             languageTag = resolved().tag(),
@@ -283,19 +328,42 @@ class SessionRuntime(
 
     private fun onSpeech(hypotheses: List<SpeechHypothesis>) {
         val decision = UtteranceRouter.choose(hypotheses, session.routeContext())
+        val heard = hypotheses.firstOrNull()?.text.orEmpty()
         when (decision) {
             RouteDecision.Ignore -> openMic()
             is RouteDecision.Unclear -> scope.launch {
                 val coached = coach.interpret(decision.utterance, session.coachContext(resolved().tag()))
-                if (coached != null) dispatch(session.onAction(coached))
-                else dispatch(session.accept(decision, decision.utterance))
+                when (coached) {
+                    null -> dispatch(session.accept(decision, decision.utterance))
+                    VoiceAction.Pause -> voicePause(decision.utterance)
+                    else -> act(coached)
+                }
             }
-            else -> dispatch(session.accept(decision, hypotheses.firstOrNull()?.text.orEmpty()))
+            is RouteDecision.Command -> when (decision.action) {
+                VoiceAction.Pause -> voicePause(heard)
+                VoiceAction.StartSession, VoiceAction.Resume -> {
+                    pauses.sessionStarted()
+                    PauseLog.log("${decision.action::class.simpleName} by voice [\"$heard\"]")
+                    dispatch(session.accept(decision, heard))
+                }
+                else -> dispatch(session.accept(decision, heard))
+            }
+            else -> dispatch(session.accept(decision, heard))
         }
     }
 
+    private fun voicePause(heard: String) {
+        val paused = requestPause(PauseSource.VOICE_COMMAND, "\"$heard\"") {
+            session.accept(RouteDecision.Command(VoiceAction.Pause, 1f), heard)
+        }
+        if (!paused) openMic()
+    }
+
     private fun onMicError(message: String) {
-        if (message != "no-match" && message != "timeout") return
+        if (message != "no-match" && message != "timeout") {
+            PauseLog.log("recognizer error $message in ${session.snapshot().phase.name} (never pauses)")
+            return
+        }
         val snap = session.snapshot()
         val plan = AudioTurnPolicy.plan(snap.phase, snap.exercise?.modality, snap.keepListening)
         if (plan.mic == MicMode.SPEECH) openMic()

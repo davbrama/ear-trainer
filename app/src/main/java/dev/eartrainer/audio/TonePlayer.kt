@@ -59,6 +59,12 @@ class TonePlayer(
 
     fun mediaItem(file: File, metadata: MediaMetadata): MediaItem = itemFor(file, metadata)
 
+    /** Undo a controller pause the session decided to ignore. */
+    fun resumeIfPaused() {
+        if (player.playWhenReady || player.playbackState == Player.STATE_ENDED) return
+        within { player.play() }
+    }
+
     fun stop() {
         onEnded = null
         within {

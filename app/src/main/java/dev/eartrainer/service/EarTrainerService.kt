@@ -33,6 +33,7 @@ import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import dev.eartrainer.MainActivity
+import dev.eartrainer.PauseLog
 import dev.eartrainer.R
 import dev.eartrainer.audio.AndroidAudioFocus
 import dev.eartrainer.audio.AndroidSpeechSynthesizer
@@ -90,7 +91,7 @@ class EarTrainerService : MediaLibraryService() {
             context = this,
             speechOut = speechOut,
             input = SwitchingAudioInput(speechIn, PcmMicCapture(), StubPitchDetector()),
-            focus = AndroidAudioFocus(this),
+            focus = AndroidAudioFocus(this, PauseLog::log),
             player = tonePlayer,
             stores = JsonStores(filesDir),
             coach = Coaching(),
@@ -101,6 +102,7 @@ class EarTrainerService : MediaLibraryService() {
                 ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
                     PackageManager.PERMISSION_GRANTED
             },
+            mediaController = { session.controllerForCurrentRequest?.packageName },
         )
         runtime.state // touch
     }
